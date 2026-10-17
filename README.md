@@ -34,6 +34,10 @@
 - 提子数由 `removeGroup` 返回值累加，而不是"每提一组 +1"
 - 输入框失焦自动钳制：只修刚失焦的框、空框不修正
 
+## 学习笔记
+
+从 EasyX 开发 → 围棋规则 → 代码质量 → Git 开源 → 打包发布的**全链路知识总结**（含踩坑记录与命令速查）：[LEARNING_NOTES.md](LEARNING_NOTES.md)
+
 ## 许可证
 
 [MIT License](LICENSE)
