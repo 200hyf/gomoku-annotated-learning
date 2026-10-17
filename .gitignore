@@ -1,13 +1,15 @@
 # ===== Visual Studio 缓存与本地用户配置 =====
 .vs/
-*.user        # vcxproj.user：本机专用（调试路径等），不该进仓库
+# vcxproj.user：本机专用（调试路径等），不该进仓库
+*.user
 *.suo
 
 # ===== 构建产物（编译生成，任何人都能重新编译出来）=====
 Debug/
 Release/
 x64/
-五子棋注释学习版/     # 旧版构建残留目录（里面全是 obj/pdb）
+# 旧版构建残留目录（里面全是 obj/pdb）
+五子棋注释学习版/
 *.obj
 *.pdb
 *.ilk
