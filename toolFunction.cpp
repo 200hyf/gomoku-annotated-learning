@@ -507,11 +507,13 @@ bool netSend(char op, char col, char row)
 // 点"创建房间"：初始化 + 监听，只改状态文字（对局页由 main.cpp 在 accept 成功后切入）
 void startNetHost()
 {
-	if (netInit() && netHostStart(NET_PORT))
+	int port = NET_PORT;                                   // 端口默认 5000
+	if (!netPage.inputs[1].text.empty()) port = stoi(netPage.inputs[1].text);  // 主机也能在端口框改端口
+	if (netInit() && netHostStart((short)port))
 	{
 		g_netMode = true;    // 进入联机模式
 		g_netHost = true;    // 我是主机
-		g_netStatus = "已创建房间，等待对方加入…（对方填你的IP，端口" + to_string(NET_PORT) + "）";
+		g_netStatus = "已创建房间，等待对方加入…（对方填你的IP，端口" + to_string(port) + "）";
 	}
 	else g_netStatus = "创建房间失败（端口被占用？）";
 }
@@ -568,17 +570,46 @@ string zh(const string& s)
 }
 
 // ===================== 本机 IP 获取 =====================
+// 电脑可能有多张网卡（WiFi、网线、虚拟机虚拟网卡…），按主机名查容易选错网卡。
+// 最可靠的办法是"UDP 选路"：拿一个 UDP socket 去 connect 一个公网地址——
+// 这不会真的发数据，只是让系统在路由表里挑"走哪块网卡"，再问它出口 IP 是多少。
+// 这个 IP 就是对方电脑真正能连到的那个。
+// 注意：Winsock 函数（socket/gethostbyname）必须先 WSAStartup 初始化才能用，
+// 所以本函数自己初始化、自己清理，不依赖用户是否点过"创建/加入房间"。
 string getLocalIP()
 {
+	WSADATA wsa;
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return "";   // 初始化网络库，失败直接返回空
+
+	// 方法①（首选）：UDP 选路法
+	SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);            // 建 UDP socket（比 TCP 轻，不发数据）
+	if (s != INVALID_SOCKET)
+	{
+		SOCKADDR_IN remote = {};
+		remote.sin_family = AF_INET;
+		remote.sin_port = htons(80);
+		remote.sin_addr.s_addr = inet_addr("8.8.8.8");    // 随便一个公网地址（只选路，不真连）
+		connect(s, (SOCKADDR*)&remote, sizeof(remote));   // 让系统挑出口网卡
+		SOCKADDR_IN local = {};
+		int len = sizeof(local);
+		getsockname(s, (SOCKADDR*)&local, &len);          // 问系统：出口网卡的 IP 是多少
+		closesocket(s);
+		string ip = inet_ntoa(local.sin_addr);
+		if (ip != "0.0.0.0" && ip != "127.0.0.1") { WSACleanup(); return ip; }   // 拿到真实出口 IP
+	}
+	// 方法②（兜底）：按主机名查所有网卡，优先 192.168 网段（家用/办公最常见）
 	char host[256] = {};
-	gethostname(host, sizeof(host));          // 拿本机计算机名（查 IP 要用它当"线索"）
-	HOSTENT* he = gethostbyname(host);        // 按计算机名查本机所有 IP（HOSTENT = 主机信息表）
-	string ip;
-	if (he)                                   // 查到才有得遍历
-		for (int i = 0; he->h_addr_list[i]; i++)        // 遍历每个 IP（列表以空指针结尾）
+	gethostname(host, sizeof(host));
+	HOSTENT* he = gethostbyname(host);
+	string first;
+	if (he)
+		for (int i = 0; he->h_addr_list[i]; i++)
 		{
-			ip = inet_ntoa(*(in_addr*)he->h_addr_list[i]);  // 二进制地址 → "192.168.1.5"
-			if (ip != "127.0.0.1") break;                 // 优先要"非回环"的真实局域网 IP
+			string ip = inet_ntoa(*(in_addr*)he->h_addr_list[i]);
+			if (ip == "127.0.0.1") continue;
+			if (first.empty()) first = ip;
+			if (ip.compare(0, 8, "192.168.") == 0) { WSACleanup(); return ip; }
 		}
-	return ip;
+	WSACleanup();
+	return first;
 }
