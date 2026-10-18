@@ -22,6 +22,7 @@ int boardX = 5, boardY = 5;   // 棋盘行列数，默认 5×5（全局：main �
 bool   g_netMode = false;        // 是否联机对局（true = 这盘是联机）
 bool   g_netHost = false;        // 我是不是主机（服务器）
 bool   g_netConnected = false;   // 双方是否连上
+bool   g_netRelay = false;       // 是否中转模式（true = 经公网服务器转发，异地联机用）
 int    g_netTurn = 1;            // 我方执棋：主机=1黑先 客户端=2白后
 SOCKET g_netSock = INVALID_SOCKET;  // 网络 socket（INVALID_SOCKET = "没有有效的 socket"）
 string g_netStatus;              // 联机页状态文字
@@ -439,7 +440,7 @@ bool netInit()
 void netEnd()
 {
 	closeSock();                                     // 挂断
-	g_netMode = g_netHost = g_netConnected = false;  // 网络标志全部复位
+	g_netMode = g_netHost = g_netConnected = g_netRelay = false;  // 网络标志全部复位
 	WSACleanup();                                    // 卸载网络库
 }
 
@@ -541,6 +542,30 @@ bool startNetClient()
 	resetBoard();
 	g_netStatus = "";
 	return true;              // 成功 → OnClick 里 pageState = PAGE_PLAY
+}
+
+// 点"通过服务器联机"：先连上中转服务器，等服务器发"身份包"（op=7）再自动进对局。
+// 中转服务器 = 一台有公网 IP 的小服务器，只做"传话"：它先收到的玩家当主机(黑先)，
+// 后到的当客户端(白后)，然后用 op=7 身份包告诉双方。这样两台电脑不在同一局域网也能联机。
+bool startNetRelay()
+{
+	if (!netInit()) { g_netStatus = "网络初始化失败"; return false; }
+	string ip = netPage.inputs[0].text;              // 读 IP 输入框（此时应填服务器公网 IP）
+	int port = NET_PORT;                             // 端口默认 5000
+	if (!netPage.inputs[1].text.empty()) port = stoi(netPage.inputs[1].text);
+	if (ip.empty()) { g_netStatus = "请先填写服务器 IP"; netEnd(); return false; }
+	if (!netClientConnect(ip.c_str(), (short)port))  // 拨号连服务器（复用客户端的拨号函数）
+	{
+		g_netStatus = "连接服务器失败，请检查服务器 IP 和端口";
+		netEnd();
+		return false;
+	}
+	g_netMode = true;         // 进入联机模式
+	g_netHost = false;        // 我不是直连主机（身份等服务器用 op=7 身份包告诉）
+	g_netRelay = true;        // 标记中转模式 → main.cpp 会等身份包而不是等 accept
+	g_netConnected = false;   // 还没配对成功，先不置位（收到身份包后由 main.cpp 置位）
+	g_netStatus = "已连接中转服务器，等待对方…（先连的当主机黑先）";
+	return true;              // 成功 → 留在联机页，配对上自动进对局页
 }
 
 // ===================== 中文编码自适应 =====================

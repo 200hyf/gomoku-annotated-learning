@@ -105,8 +105,10 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 			bool busy = g_netMode;   // 已经开始等待/连接了
 			netPage.buttons[0].enable = !busy;   // 创建房间
 			netPage.buttons[1].enable = !busy;   // 加入房间
+			netPage.buttons[2].enable = !busy;   // 通过服务器联机（连服务器也算"开始连接"）
 			netPage.inputs[0].enable = !busy;    // IP 框
 			netPage.inputs[1].enable = !busy;    // 端口框
+			// buttons[3] = 返回主页：不锁，等待中也能随时撤（netEnd 会清理）
 		}
 
 		// 画当前页面
@@ -123,14 +125,14 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 			string st = zh(g_netStatus);   // 中文编码自适应
 			outtextxy(getwidth() / 2 - textwidth(st.c_str()) / 2, ny0 + nrow * 2 + nrow / 2 - 15, st.c_str());
 		}
-		// 联机页：右下角显示本机 IP，方便对方填写（static = 只算一次，之后都用缓存）
+		// 联机页：右下角显示本机 IP（直连时让对方填这个；中转联机时输入框应填服务器IP，不是这个）
 		if (pageState == PAGE_NET)
 		{
 			static string localIP = getLocalIP();
 			if (localIP.empty()) localIP = "127.0.0.1";   // 兜底：取不到就显示回环地址
 			settextstyle(18, 0, UI_FONT);
 			settextcolor(LIGHTGRAY);
-			string ipTip = "本机IP: " + localIP;   // "本机IP" 也是 UTF-8 源码，同样走编码适配
+			string ipTip = "本机IP: " + localIP + "（直连时让对方填这个）";   // 防止把本机IP误当成对方IP
 			string ipDisp = zh(ipTip);
 			outtextxy(getwidth() - textwidth(ipDisp.c_str()) - 20, getheight() - 35, ipDisp.c_str());
 		}
@@ -184,7 +186,7 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 		// ===== 联机网络：每帧轮询 =====
 		if (g_netMode)
 		{
-			// 主机：还没人连进来 → 每帧试着接一次
+			// 直连主机：还没人连进来 → 每帧试着接一次
 			if (g_netHost && !g_netConnected)
 			{
 				if (netHostAccept())           // 有人连进来了！
@@ -195,6 +197,21 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 					resetBoard();
 					g_netStatus = "";
 					pageState = PAGE_PLAY;     // 双方就位 → 进对局页
+				}
+			}
+			// 中转模式：已连上服务器、还没配对 → 等服务器发身份包（op=7，col=1主机黑/2客户端白）
+			else if (g_netRelay && !g_netConnected)
+			{
+				NetMsg msg;
+				if (netRecv(msg) && msg.op == 7)   // 收到身份包 = 服务器已把两人配对
+				{
+					g_netTurn = msg.col;           // 身份：1=主机(黑先) 2=客户端(白后)
+					g_netConnected = true;         // 配对完成
+					g_game = 1; boardX = boardY = 15;   // 联机固定五子棋 15×15
+					g_turn = 1;                    // 黑先：主机(黑)先手，客户端要等收到落子才能点
+					resetBoard();
+					g_netStatus = "";
+					pageState = PAGE_PLAY;         // 双方就位 → 进对局页
 				}
 			}
 			// 已连上 → 收对方的消息（落子 / 离开）

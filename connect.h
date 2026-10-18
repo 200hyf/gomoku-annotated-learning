@@ -31,8 +31,8 @@ static const int  NET_PORT = 5000;      // 联机默认端口（局域网内两�
 // 网络上发的每一条消息 = 固定 4 字节：操作码 + 落子坐标 + 占位
 struct NetMsg
 {
-	char op;    // 1=落子（后面 col,row 是要落的子） 3=对方离开
-	char col;   // 落子的列
+	char op;    // 1=落子（后面 col,row 是要落的子） 3=对方离开 7=中转服务器身份包
+	char col;   // 落子的列（op==7 时：1=你是主机黑先 2=你是客户端白后）
 	char row;   // 落子的行
 	char pad;   // 占位符（凑够 4 字节，保持消息格式固定好解析）
 };
@@ -112,6 +112,8 @@ bool netSend(char op, char col, char row);           // 发一条消息
 // 联机流程封装（page.cpp 的 OnClick 调用，实现见 toolFunction.cpp）
 void startNetHost();            // 点"创建房间"：初始化+监听，只改状态文字
 bool startNetClient();          // 点"加入房间"：读IP端口+拨号，成功返回 true（调用方负责跳对局页）
+bool startNetRelay();           // 点"通过服务器联机"：连中转服务器，成功返回 true（等服务器发身份包后自动进对局）
+extern bool g_netRelay;         // 是否中转模式（true = 经公网服务器转发，用于异地联机）
 
 // ===================== 页面 =====================
 struct Page                     // 页面：除了数据，还能有函数（叫"成员函数/方法"）

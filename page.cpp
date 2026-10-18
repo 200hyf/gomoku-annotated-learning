@@ -135,12 +135,16 @@ void initPages()                  // 构建所有页面的按钮和输入框
 	netPage.addButton(nx1, ny0, "创建房间(主机)", 24);
 	netPage.addButton(nx1 + nw1 + 20, ny0, "加入房间(客户端)", 24);
 	// 行2：IP 输入框（允许小数点，最多 15 位）+ 端口输入框（最多 5 位），整组居中
-	netPage.addInput(w / 2 - 300, ny0 + nrow, 300, 46, true, "对方IP如192.168.1.5", true, 15);
+	// label 提示两种填法：直连填"对方电脑 IP"，中转填"服务器公网 IP"
+	netPage.addInput(w / 2 - 300, ny0 + nrow, 300, 46, true, "对方IP或服务器IP", true, 15);
 	netPage.addInput(w / 2 + 10,  ny0 + nrow, 200, 46, false, "端口", false, 5);   // 端口框 200 宽，5 位数放得下
 	netPage.inputs[1].text = "5000";   // 端口默认填 5000（和 NET_PORT 一致，一般不用改）
 	netPage.inputs[1].cursorIndex = 4;
-	// 行3：返回主页（状态文字画在 行2 和 行3 之间，见 main.cpp）
-	netPage.addButton(centerX(w, "返回主页", 24), ny0 + nrow * 3, "返回主页", 24);
+	// 行3：通过服务器联机（异地用，填服务器IP）/ 返回主页 并排
+	int nw3 = btnWidth("通过服务器联机", 24), nw4 = btnWidth("返回主页", 24);
+	int nx3 = w / 2 - (nw3 + nw4 + 20) / 2;
+	netPage.addButton(nx3, ny0 + nrow * 3, "通过服务器联机", 24);
+	netPage.addButton(nx3 + nw3 + 20, ny0 + nrow * 3, "返回主页", 24);
 }
 
 // ===================== 页面点击分发 =====================
@@ -230,7 +234,8 @@ void OnClick(int& pageState, int idx, int& boardX, int& boardY)
 	case PAGE_NET:                   // —— 联机对弈页
 		if (idx == 0)      startNetHost();   // 创建房间（当主机）：初始化+监听，见 toolFunction.cpp
 		else if (idx == 1) { if (startNetClient()) pageState = PAGE_PLAY; }   // 加入房间（成功才进对局页）
-		else if (idx == 2)           // 返回主页
+		else if (idx == 2) startNetRelay();   // 通过服务器联机：连中转服务器，配对上自动进对局
+		else if (idx == 3)           // 返回主页
 		{
 			if (g_netMode) netEnd();   // 已创建/尝试过 → 清理网络
 			netPage.clearInputs();
