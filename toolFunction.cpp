@@ -1,8 +1,11 @@
 ﻿//toolFunction.cpp
+#define _WINSOCK_DEPRECATED_NO_WARNINGS  // 允许用老 API inet_addr（"192.168.1.5"→二进制，教学直观）
+#include <winsock2.h>       // socket 网络编程头（必须最先：winsock2 与 windows.h 里的旧 socket 头冲突）
 #include <graphics.h>
 #include <windows.h>
 #include <string>
 #include "connect.h"
+#pragma comment(lib, "ws2_32.lib")   // 告诉编译器链接 Windows socket 库（网络函数都在里面）
 using namespace std;
 
 // ===================== 对局数据（定义） =====================
@@ -13,6 +16,15 @@ int g_game = 1;               // 游戏模式：1=五子棋 2=围棋 3=井字棋
 int g_winner = 0;             // 胜负：0=进行中 1=黑胜 2=白胜 3=平局
 int g_blackCap = 0;           // 黑方提子数（围棋：黑提掉的白子数）
 int g_whiteCap = 0;           // 白方提子数（围棋：白提掉的黑子数）
+int boardX = 5, boardY = 5;   // 棋盘行列数，默认 5×5（全局：main 画棋盘、网络层设 15×15 都用它）
+
+// ===================== 联机状态（定义） =====================
+bool   g_netMode = false;        // 是否联机对局（true = 这盘是联机）
+bool   g_netHost = false;        // 我是不是主机（服务器）
+bool   g_netConnected = false;   // 双方是否连上
+int    g_netTurn = 1;            // 我方执棋：主机=1黑先 客户端=2白后
+SOCKET g_netSock = INVALID_SOCKET;  // 网络 socket（INVALID_SOCKET = "没有有效的 socket"）
+string g_netStatus;              // 联机页状态文字
 
 // 围棋四方向偏移（上下左右），下面几个函数共用
 const int dr[4] = { -1, 1, 0, 0 };
@@ -183,7 +195,8 @@ bool inRect(int x, int y, int rx, int ry, int rw, int rh)
 // 绘制文字按钮，悬浮高亮
 void drawButton(coordinates judp, TextButton& btn)
 {
-	const char* pText = btn.text.c_str();      // string → C 风格字符串（EasyX 画字要这种）
+	string disp = zh(btn.text);           // 中文编码自适应：源码 UTF-8 → 当前系统能显示的编码
+	const char* pText = disp.c_str();     // string → C 风格字符串（EasyX 画字要这种）
 	settextstyle(btn.fontSize, 0, btn.font);   // 用按钮自己的字体（addButton 没传就=UI_FONT）
 	setbkmode(TRANSPARENT);                    // 文字背景透明，不盖住底色
 	btn.w = textwidth(pText) + 2 * BTN_PAD_X;  // 按钮宽自适应 = 文字宽 + 左右内边距
@@ -213,18 +226,18 @@ void drawTextBox(coordinates judp, TextInputBox& box, bool blink)
 	if (box.text.empty() && !box.label.empty())   // 框是空的且有占位提示 → 显示浅灰提示
 	{
 		settextcolor(LIGHTGRAY);
-		outtextxy(box.x + padX, box.y + padY, box.label.c_str());
+		outtextxy(box.x + padX, box.y + padY, zh(box.label).c_str());
 	}
 	else                                          // 否则显示实际输入的文字
 	{
 		settextcolor(box.textColor);
-		outtextxy(box.x + padX, box.y + padY, box.text.c_str());
+		outtextxy(box.x + padX, box.y + padY, zh(box.text).c_str());
 	}
 
 	// ===== 闪烁光标：位置和长度都自适应 =====
 	if (box.isFocus && blink)
 	{
-		int curX = box.x + padX + textwidth(box.text.substr(0, box.cursorIndex).c_str());
+		int curX = box.x + padX + textwidth(zh(box.text.substr(0, box.cursorIndex)).c_str());
 		// substr(0, cursorIndex) = 截取"光标前"的子串，测它的宽度 → 光标跟着文字末尾走
 		line(curX, box.y + padY, curX, box.y + padY + textH);   // 光标长度 = 文字高度
 	}
@@ -257,10 +270,15 @@ void handleInput(TextInputBox& box, char ch)
 		if (box.cursorIndex < (int)box.text.size()) box.cursorIndex++;  // 右移，不能超过长度
 		return;
 	}
-	// 只接收数字字符，且最多 2 位（棋盘大小范围 5~30，最大是两位数）
-	if (ch >= '0' && ch <= '9')          // 字符比较：'0'~'9' 就是数字键
+	// 小键盘数字键的键码和主键盘不一样（0x60~0x69），先转成普通数字字符
+	if (ch >= VK_NUMPAD0 && ch <= VK_NUMPAD9)
+		ch = (char)(ch - VK_NUMPAD0 + '0');   // 0x60→'0'、0x61→'1' … 0x69→'9'
+	// 句号键同理：主键盘句号 = VK_OEM_PERIOD(0xBE)、小键盘小数点 = VK_DECIMAL(0x6E)，都转成 '.'
+	if (ch == VK_OEM_PERIOD || ch == VK_DECIMAL) ch = '.';
+	// 接收数字字符（联机 IP 框还允许小数点）
+	if (ch >= '0' && ch <= '9' || (box.allowDot && ch == '.'))   // 数字，或 IP 框里的小数点
 	{
-		if (box.text.size() >= 2) return;   // 已经 2 位 → 忽略新输入（比如 100 的第 3 位输不进去）
+		if ((int)box.text.size() >= box.maxLen) return;   // 到上限就忽略（棋盘 2 位 / IP 15 位 / 端口 5 位）
 		box.text.insert(box.cursorIndex, 1, ch);   // 在光标位置插入 1 个字符
 		box.cursorIndex++;                         // 光标后移
 	}
@@ -385,4 +403,182 @@ void CheckWindowSize()
 	flushmessage();                     // 清残留消息
 	BeginBatchDraw();                   // 重开批量绘图
 	initPages();                        // 重建页面布局
+}
+
+// ===================== 联机对弈（WinSock2 + TCP） =====================
+// 网络原理速览：
+//  TCP 就像打电话：先"拨号"(connect)接通，再你一句我一句(send/recv)，最后挂断(close)
+//  主机 = 守在电话机旁等人打进来(bind+listen+accept)；客户端 = 主动拨号(connect)
+//  非阻塞 = 拨过去没人接也不傻等，马上回来继续干活 → 游戏主循环才不会卡住
+//  分层：本文件只做"网络层"；联机页怎么点、对局怎么轮询在 page.cpp / main.cpp
+
+// 关掉当前 socket（有才关，防止关"空气"）——三个函数共用，省去重复写法
+static void closeSock()
+{
+	if (g_netSock != INVALID_SOCKET) { closesocket(g_netSock); g_netSock = INVALID_SOCKET; }
+}
+
+// 组装网络地址（主机传 ip=NULL = 接受任何网卡；客户端传具体 IP）——主机/客户端共用
+static SOCKADDR_IN makeAddr(const char* ip, short port)
+{
+	SOCKADDR_IN addr = {};
+	addr.sin_family = AF_INET;                       // IPv4 协议族
+	addr.sin_port = htons(port);                     // 端口；htons = 主机字节序 → 网络字节序
+	addr.sin_addr.s_addr = ip ? inet_addr(ip) : INADDR_ANY;   // "192.168.1.5"→二进制；没给=接受任何IP
+	return addr;
+}
+
+// 初始化网络库（第一次联网前调用一次）
+bool netInit()
+{
+	WSADATA wsa;                                   // Winsock 信息（版本等，暂不用关心内容）
+	return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;  // 初始化网络库，成功返回 0
+}
+
+// 结束网络：挂断连接、清理，回到本地模式
+void netEnd()
+{
+	closeSock();                                     // 挂断
+	g_netMode = g_netHost = g_netConnected = false;  // 网络标志全部复位
+	WSACleanup();                                    // 卸载网络库
+}
+
+// 把 socket 设为"非阻塞"：收不到数据立刻返回，而不是傻等 → 主循环不被卡住
+static void setNonBlock(SOCKET s)
+{
+	u_long mode = 1;                                 // 1 = 非阻塞
+	ioctlsocket(s, FIONBIO, &mode);
+}
+
+// 主机：创建监听 socket（相当于在门口装了个门铃）
+bool netHostStart(short port)
+{
+	g_netSock = socket(AF_INET, SOCK_STREAM, 0);     // 建一个 TCP socket
+	if (g_netSock == INVALID_SOCKET) return false;
+	SOCKADDR_IN addr = makeAddr(NULL, port);         // 接受任何 IP 来的连接（本机所有网卡都行）
+	if (bind(g_netSock, (SOCKADDR*)&addr, sizeof(addr)) != 0) { closeSock(); return false; }  // 绑定端口
+	if (listen(g_netSock, 1) != 0)                   { closeSock(); return false; }            // 开始监听
+	setNonBlock(g_netSock);
+	return true;
+}
+
+// 主机每帧调用：有人连进来就"接电话"
+bool netHostAccept()
+{
+	SOCKET s = accept(g_netSock, NULL, NULL);        // 接受连接（非阻塞：没人就返回无效值）
+	if (s == INVALID_SOCKET) return false;           // 还没人来，下帧再试
+	closeSock();                                     // 监听 socket 功成身退
+	g_netSock = s;                                   // 换成和对方通信的 socket
+	setNonBlock(g_netSock);
+	return true;                                     // 连上了！
+}
+
+// 客户端：主动拨号连主机
+bool netClientConnect(const char* ip, short port)
+{
+	g_netSock = socket(AF_INET, SOCK_STREAM, 0);
+	if (g_netSock == INVALID_SOCKET) return false;
+	SOCKADDR_IN addr = makeAddr(ip, port);
+	if (addr.sin_addr.s_addr == INADDR_NONE) { closeSock(); return false; }  // IP 格式不对
+	if (connect(g_netSock, (SOCKADDR*)&addr, sizeof(addr)) != 0) { closeSock(); return false; }  // 拨号
+	setNonBlock(g_netSock);
+	return true;
+}
+
+// 收一条消息：有数据填进 msg 返回 true；没数据返回 false；对方挂断 → msg.op=3（离开）
+bool netRecv(NetMsg& msg)
+{
+	if (g_netSock == INVALID_SOCKET) return false;
+	int n = recv(g_netSock, (char*)&msg, sizeof(msg), 0);  // 读 4 字节
+	if (n == SOCKET_ERROR) return false;   // 非阻塞：暂时没数据，正常情况
+	if (n == 0) { msg.op = 3; return true; }  // recv 返回 0 = 对方关闭连接 → 当"离开"消息
+	return true;
+}
+
+// 发一条消息（操作码 + 落子坐标）
+bool netSend(char op, char col, char row)
+{
+	if (g_netSock == INVALID_SOCKET) return false;
+	NetMsg m = { op, col, row, 0 };
+	return send(g_netSock, (char*)&m, sizeof(m), 0) == sizeof(m);  // 发出去 4 字节才算成功
+}
+
+// ===================== 联机流程封装（page.cpp 的 OnClick 调用） =====================
+// 点"创建房间"：初始化 + 监听，只改状态文字（对局页由 main.cpp 在 accept 成功后切入）
+void startNetHost()
+{
+	if (netInit() && netHostStart(NET_PORT))
+	{
+		g_netMode = true;    // 进入联机模式
+		g_netHost = true;    // 我是主机
+		g_netStatus = "已创建房间，等待对方加入…（对方填你的IP，端口" + to_string(NET_PORT) + "）";
+	}
+	else g_netStatus = "创建房间失败（端口被占用？）";
+}
+
+// 点"加入房间"：读输入框 → 拨号 → 成功返回 true（调用方 OnClick 负责跳对局页）
+bool startNetClient()
+{
+	if (!netInit()) { g_netStatus = "网络初始化失败"; return false; }
+	string ip = netPage.inputs[0].text;              // 读 IP 输入框
+	int port = NET_PORT;                             // 端口默认 5000
+	if (!netPage.inputs[1].text.empty()) port = stoi(netPage.inputs[1].text);
+	if (ip.empty()) { g_netStatus = "请先填写对方 IP"; netEnd(); return false; }
+	if (!netClientConnect(ip.c_str(), (short)port))  // 拨号失败
+	{
+		g_netStatus = "连接失败，请检查 IP 和端口（对方是否已创建房间？）";
+		netEnd();
+		return false;
+	}
+	g_netMode = true;         // 进入联机模式
+	g_netHost = false;        // 我是客户端
+	g_netConnected = true;    // 客户端一连上就算"已连接"（主机那边要等 accept）
+	g_netTurn = 2;            // 客户端执白（后手）
+	g_game = 1; boardX = boardY = 15;   // 联机固定五子棋 15×15
+	g_turn = 1;               // 黑先：初始轮到主机（黑），客户端要等收到落子才能点
+	resetBoard();
+	g_netStatus = "";
+	return true;              // 成功 → OnClick 里 pageState = PAGE_PLAY
+}
+
+// ===================== 中文编码自适应 =====================
+// 源码文件存的是 UTF-8（带 BOM），中文字符串进 exe 时就是 UTF-8 字节。
+// 但 EasyX 画中文用的是"系统 ANSI 代码页"：
+//  - Windows 开了"使用 Unicode UTF-8 全球语言支持" → 代码页 = 65001(UTF-8) → 直接显示 ✓
+//  - 普通中文系统 → 代码页 = 936(GBK) → UTF-8 字节会被当 GBK 解释 → 乱码 ✗
+// 所以运行时先检测一次系统代码页，需要转换就转换（这行代码让程序拿到任何电脑都能正常显示中文）
+bool g_utf8System = (GetACP() == CP_UTF8);   // 系统当前 ANSI 代码页是不是 UTF-8
+
+string zh(const string& s)
+{
+	if (g_utf8System) return s;              // 系统就是 UTF-8 → 原样返回，零开销
+	for (char c : s)                         // 先扫一遍：有没有中文字节（大于 127）
+		if ((unsigned char)c > 0x7F)         // 有中文才转码；纯 ASCII（数字/英文）任何系统都一样
+		{
+			// 三步转换：UTF-8 → 宽字符(Unicode) → 系统 ANSI(GBK)
+			int wlen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, NULL, 0);   // 先算需要多长的宽字符缓冲
+			wstring w(wlen, 0);
+			MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], wlen);          // ① UTF-8 字节 → Unicode
+			int alen = WideCharToMultiByte(CP_ACP, 0, w.c_str(), -1, NULL, 0, NULL, NULL);
+			string a(alen, 0);
+			WideCharToMultiByte(CP_ACP, 0, w.c_str(), -1, &a[0], alen, NULL, NULL); // ② Unicode → GBK
+			return a;
+		}
+	return s;                                // 纯 ASCII → 不用转，直接原样返回
+}
+
+// ===================== 本机 IP 获取 =====================
+string getLocalIP()
+{
+	char host[256] = {};
+	gethostname(host, sizeof(host));          // 拿本机计算机名（查 IP 要用它当"线索"）
+	HOSTENT* he = gethostbyname(host);        // 按计算机名查本机所有 IP（HOSTENT = 主机信息表）
+	string ip;
+	if (he)                                   // 查到才有得遍历
+		for (int i = 0; he->h_addr_list[i]; i++)        // 遍历每个 IP（列表以空指针结尾）
+		{
+			ip = inet_ntoa(*(in_addr*)he->h_addr_list[i]);  // 二进制地址 → "192.168.1.5"
+			if (ip != "127.0.0.1") break;                 // 优先要"非回环"的真实局域网 IP
+		}
+	return ip;
 }

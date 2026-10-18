@@ -1,5 +1,6 @@
 ﻿//connect.h
 #pragma once                    // "只包含一次"：防止这个头文件被重复 #include 导致重复定义
+#include <winsock2.h>           // socket 网络编程头（放最前：与 windows.h 里的老版 socket 头兼容）
 #include <vector>               // 引入标准库 vector：自动扩容的数组
 #include <string>               // 引入 string：字符串类型
 #include <graphics.h>           // EasyX 图形库：画图、建窗口、收鼠标键盘消息
@@ -13,7 +14,8 @@ enum PageState {                // enum = 枚举：给一组整数起名字，�
 	PAGE_SYS_SETTING = 2,       // 系统设置页 = 2
 	PAGE_INPUT_BOARD = 3,       // 棋盘行列输入页 = 3
 	PAGE_INPUT_SCREEN = 4,      // 屏幕尺寸输入页 = 4
-	PAGE_PLAY = 5               // 游戏对局页 = 5
+	PAGE_PLAY = 5,              // 游戏对局页 = 5
+	PAGE_NET = 6                // 联机对弈设置页 = 6（新）
 };
 
 // ===================== UI 默认样式（改这里 = 全局生效） =====================
@@ -22,7 +24,23 @@ static const int  BTN_PAD_X = 14;       // 按钮左右内边距：按钮宽 = �
 static const int  BTN_PAD_Y = 6;        // 按钮上下内边距：按钮高 = 文字高 + 2×这个值
 static const int  GO_WIN = 10;          // 围棋提子数达到这个值即胜（简化胜负规则）
 static const int  GO_EDGE = 18;         // 围棋棋盘 18 格 = 19 路交叉点（编号 0~18）
+static const int  NET_PORT = 5000;      // 联机默认端口（局域网内两台电脑都要用同一个端口）
 // 气/提子计算只认这个边界：棋盘外(19~30)的位置虽然数组里是 0，但不能当"气"，否则边缘棋子永远提不掉
+
+// ===================== 联机消息 =====================
+// 网络上发的每一条消息 = 固定 4 字节：操作码 + 落子坐标 + 占位
+struct NetMsg
+{
+	char op;    // 1=落子（后面 col,row 是要落的子） 3=对方离开
+	char col;   // 落子的列
+	char row;   // 落子的行
+	char pad;   // 占位符（凑够 4 字节，保持消息格式固定好解析）
+};
+
+// ===================== 工具函数（声明） =====================
+// 注意：这两个声明必须放在 Page 结构体之前——Page::draw 里要调用 zh，而 C++ 规定"调用前必须先见到声明"
+string zh(const string& s);   // 中文编码自适应：把源码里的 UTF-8 字符串转成当前系统能正确显示的编码
+string getLocalIP();          // 获取本机 IPv4 地址（联机页右下角显示，方便对方填写）
 
 // ===================== 结构体 =====================
 // 普通文字按钮
@@ -47,6 +65,8 @@ struct TextInputBox
 	int cursorIndex;            // 光标停在"第几个字符"的位置
 	bool enable;                // 是否显示/可交互（自定义模式才显示输入框）
 	string label;               // 占位提示文字（框为空时显示，如"列数(5~30)"）
+	bool allowDot = false;      // 是否允许输入小数点（联机的 IP 框需要：192.168.1.5）
+	int  maxLen = 2;            // 最多能输入几个字符（棋盘框 2 位；IP 框 15 位；端口框 5 位）
 };
 // 精简说明：删掉了 enable(永远 true)、blinkState(改为函数参数)、3 个"高亮色"字段
 // （聚焦高亮色统一写在 drawTextBox 里，原来也没法单独配，删了无损失）
@@ -80,6 +100,19 @@ void initPages();                                       // 构建所有页面
 void OnClick(int& pageState, int idx, int& boardX, int& boardY);
 // 参数里的 & 也是引用：OnClick 里改 pageState，main() 里的 pageState 会跟着变 —— 让函数"把结果带出来"
 
+// ===================== 联机网络函数声明 =====================
+// 实现都在 toolFunction.cpp（网络章节），这里只是告诉其他文件"有这些函数"
+bool netInit();                 // 初始化网络（WSAStartup，程序里第一次联网前调用一次）
+void netEnd();                  // 结束网络：关 socket、清理（回到本地模式）
+bool netHostStart(short port);  // 当主机：创建监听 socket，等别人连进来
+bool netHostAccept();           // 主机每帧调用：有人连就接上，返回 true
+bool netClientConnect(const char* ip, short port);   // 当客户端：连主机
+bool netRecv(NetMsg& msg);      // 收一条消息（非阻塞，没消息返回 false）
+bool netSend(char op, char col, char row);           // 发一条消息
+// 联机流程封装（page.cpp 的 OnClick 调用，实现见 toolFunction.cpp）
+void startNetHost();            // 点"创建房间"：初始化+监听，只改状态文字
+bool startNetClient();          // 点"加入房间"：读IP端口+拨号，成功返回 true（调用方负责跳对局页）
+
 // ===================== 页面 =====================
 struct Page                     // 页面：除了数据，还能有函数（叫"成员函数/方法"）
 {
@@ -102,10 +135,12 @@ struct Page                     // 页面：除了数据，还能有函数（叫
 		// push_back = 往数组末尾加一个元素；大括号 {…} = 按字段顺序依次赋值（"聚合初始化"）
 	}
 	// 添加输入框(默认样式)；label 是框内占位提示，不传就没有
-	void addInput(int x, int y, int w, int h, bool focus, const string& label = "")
+	// allowDot：是否允许输入小数点（联机 IP 框需要）；maxLen：最多几位字符
+	void addInput(int x, int y, int w, int h, bool focus, const string& label = "",
+		bool allowDot = false, int maxLen = 2)
 	{
-		inputs.push_back({ x, y, w, h, "", BLACK, WHITE, WHITE, focus, 0, true, label });
-		// 12 个值对应 TextInputBox 的 12 个字段
+		inputs.push_back({ x, y, w, h, "", BLACK, WHITE, WHITE, focus, 0, true, label, allowDot, maxLen });
+		// 14 个值对应 TextInputBox 的 14 个字段
 	}
 	// 取消所有输入框焦点（先记下"谁正在失焦"，再全部取消）
 	void clearFocus()
@@ -146,7 +181,8 @@ struct Page                     // 页面：除了数据，还能有函数（叫
 			settextstyle(40, 0, UI_FONT);            // 标题字号固定 40
 			setbkmode(TRANSPARENT);
 			settextcolor(WHITE);
-			outtextxy(getwidth() / 2 - textwidth(title.c_str()) / 2, 100, title.c_str());
+			string t = zh(title);                    // 中文编码自适应（UTF-8→GBK 等）
+			outtextxy(getwidth() / 2 - textwidth(t.c_str()) / 2, 100, t.c_str());
 			// 水平居中：(窗口宽 - 标题宽) / 2，顶部留 45 像素
 		}
 		for (auto& b : buttons) if (b.enable) drawButton(judp, b);   // 画按钮（隐藏的跳过）
@@ -175,14 +211,24 @@ extern Page sysPage;         // 系统设置页
 extern Page inputPage;       // 棋盘行列输入页
 extern Page screenInputPage; // 屏幕尺寸输入页
 extern Page play;            // 游戏对局页
+extern Page netPage;         // 联机对弈设置页（新）
 // ===================== 对局数据（声明） =====================
 extern int g_board[31][31];  // 棋盘状态：0=空 1=黑子 2=白子（31 = 30 路棋盘有 31 个交叉点）
+extern int boardX, boardY;   // 棋盘行列数（联机固定 15×15；全局化后 main 和网络层都能改）
 extern int g_turn;           // 当前该谁下：1=黑 2=白
 extern int g_mode;           // 输入页模式：1=模板（预设大小）2=自定义（手动输入）
 extern int g_game;           // 游戏模式：1=五子棋 2=围棋 3=井字棋
 extern int g_winner;         // 胜负：0=进行中 1=黑胜 2=白胜 3=平局
 extern int g_blackCap;       // 黑方提子数（围棋：黑提掉的白子数）
 extern int g_whiteCap;       // 白方提子数（围棋：白提掉的黑子数）
+
+// ===================== 联机状态（声明） =====================
+extern bool   g_netMode;      // 是否联机对局（true = 当前这盘是联机）
+extern bool   g_netHost;      // 我是不是主机（服务器）
+extern bool   g_netConnected; // 双方是否已连上
+extern int    g_netTurn;      // 我方执棋：主机=1黑先 客户端=2白后
+extern SOCKET g_netSock;      // 网络 socket（Windows 的"网络句柄"）
+extern string g_netStatus;    // 联机页状态文字（"等待对方加入…"/"连接失败…"）
 // extern = "声明这些变量在其他文件里已经定义好了"
 // 真正的定义在 page.cpp，那里才是"创建"；这里只是告诉大家"有这么几个对象"
 // clampInputSize 声明放在这里：它用到 Page 类型，必须等 Page 定义完之后才能声明

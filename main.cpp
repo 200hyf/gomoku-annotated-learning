@@ -1,4 +1,5 @@
 ﻿//main.cpp
+#include <winsock2.h>       // socket 网络编程头（必须最先，与 windows.h 兼容）
 #include <graphics.h>       // EasyX 图形库
 #include <windows.h>        // Windows API
 #include <string>           // string 类型
@@ -13,16 +14,16 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 	BeginBatchDraw();         // ③ 开启"批量绘图"：先画在内存里，攒一帧再整屏刷新 → 不闪烁
 
 	int pageState = PAGE_HOME;      // 当前在哪个页面，初始 = 主页
-	int boardX = 5, boardY = 5;     // 棋盘行列数，默认 5×5
+	// boardX/boardY（棋盘行列数）已全局化，定义在 page.cpp，main 和网络层共用
 	ExMessage msg;                  // EasyX 的消息结构：一次鼠标/键盘事件的数据
 	coordinates mouse = { 0, 0 }, click = { 0, 0 };   // 鼠标当前位置、点击位置
 	bool mouseClick = false;        // 这一帧有没有发生左键点击
 	char key = 0;                   // 这一帧按下的键
 	bool blink = false;             // 光标当前亮不亮
 	int frame = 0;                  // 帧计数器（数到 15 就翻一次光标）
-	Page* pages[] = { &homePage, &settingPage, &sysPage, &inputPage, &screenInputPage, &play };
-	// 指针数组：把 6 个页面的"地址"排成一列。& = 取地址
-	// 数组下标正好 = 枚举值：pages[0] 主页、pages[4] 屏幕尺寸页、pages[5] 游戏对局页
+	Page* pages[] = { &homePage, &settingPage, &sysPage, &inputPage, &screenInputPage, &play, &netPage };
+	// 指针数组：把 7 个页面的"地址"排成一列。& = 取地址
+	// 数组下标正好 = 枚举值：pages[0] 主页、pages[5] 游戏对局页、pages[6] 联机设置页
 	// Page* 意思是"指向 Page 的指针"，用指针访问成员要写 ->
 
 	while (true)                    // 死循环：游戏一直跑，直到主动退出
@@ -41,9 +42,10 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 
 		Page* curPage = pages[pageState];   // 取出"当前页面"的指针
 		// 消息循环
-		while (peekmessage(&msg, EX_MOUSE | EX_KEY))
+		while (peekmessage(&msg, EX_MOUSE | EX_KEY | EX_CHAR))
 			// peekmessage = 从消息队列取一条消息（非阻塞，没有就返回假）
-			// EX_MOUSE | EX_KEY：按位或 = 只要"鼠标"或"键盘"这两类消息
+			// EX_MOUSE | EX_KEY | EX_CHAR：按位或 = 要"鼠标"或"键盘"或"字符"这三类消息
+			// EX_CHAR 单独一类：字符消息（WM_CHAR），句号键的字符码在这里最可靠
 		{
 			mouse.x = msg.x;          // 每条消息都带鼠标坐标 → 实时更新鼠标位置
 			mouse.y = msg.y;
@@ -62,6 +64,14 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 					// 失焦方式①：按回车 → 当场钳制刚失焦的框
 					if (pageState == PAGE_INPUT_BOARD) clampInputSize(inputPage);
 				}
+			}
+			// 字符消息（WM_CHAR）：句号键的字符码比虚拟键码更可靠（布局无关）。
+			// 只接受数字/句号/退格，其他（如输入法产生的全角符号）一律忽略
+			if (msg.message == WM_CHAR)
+			{
+				char c = msg.ch;                       // 字符消息带的是"字符"本身（TCHAR=char）
+				if ((c >= '0' && c <= '9') || c == '.' || c == 8)
+					key = c;   // 覆盖掉虚拟键码：主键盘句号 → '.'(0x2E)，正好被 handleInput 接收
 			}
 		}
 
@@ -89,9 +99,41 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 			inputPage.buttons[10].normalColor = (g_turn == 2) ? YELLOW : WHITE;  // 白先
 		}
 
+		// 联机页：创建/加入进行中 → 锁死按钮和输入框（防止重复创建/连两次）
+		if (pageState == PAGE_NET)
+		{
+			bool busy = g_netMode;   // 已经开始等待/连接了
+			netPage.buttons[0].enable = !busy;   // 创建房间
+			netPage.buttons[1].enable = !busy;   // 加入房间
+			netPage.inputs[0].enable = !busy;    // IP 框
+			netPage.inputs[1].enable = !busy;    // 端口框
+		}
+
 		// 画当前页面
 		curPage->draw(mouse, blink, key);
 		// 这一行干了三件事：画所有按钮、画所有输入框、把键盘输入填进选中的输入框
+
+		// 联机页：把网络状态文字画在输入框下面（比如"等待对方加入…"）
+		if (pageState == PAGE_NET && !g_netStatus.empty())
+		{
+			int ny0 = getheight() / 4 + 30, nrow = getheight() / 9;
+			settextstyle(20, 0, UI_FONT);
+			setbkmode(TRANSPARENT);
+			settextcolor(LIGHTGRAY);
+			string st = zh(g_netStatus);   // 中文编码自适应
+			outtextxy(getwidth() / 2 - textwidth(st.c_str()) / 2, ny0 + nrow * 2 + nrow / 2 - 15, st.c_str());
+		}
+		// 联机页：右下角显示本机 IP，方便对方填写（static = 只算一次，之后都用缓存）
+		if (pageState == PAGE_NET)
+		{
+			static string localIP = getLocalIP();
+			if (localIP.empty()) localIP = "127.0.0.1";   // 兜底：取不到就显示回环地址
+			settextstyle(18, 0, UI_FONT);
+			settextcolor(LIGHTGRAY);
+			string ipTip = "本机IP: " + localIP;   // "本机IP" 也是 UTF-8 源码，同样走编码适配
+			string ipDisp = zh(ipTip);
+			outtextxy(getwidth() - textwidth(ipDisp.c_str()) - 20, getheight() - 35, ipDisp.c_str());
+		}
 
 		int hitIdx = -1;                  // 本帧点中的按钮下标（-1 = 没点中按钮）
 		if (mouseClick)               // 只有这一帧有点击才处理
@@ -106,8 +148,9 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 		}
 
 		// 对局页：点击落子（五子棋/围棋落交叉点，井字棋落格子中心）
-		// 前提：没点中任何按钮，且还没分出胜负
-		if (mouseClick && pageState == PAGE_PLAY && hitIdx < 0 && g_winner == 0)
+		// 前提：没点中任何按钮，且还没分出胜负；联机时还要求"轮到我"（g_turn == g_netTurn）
+		if (mouseClick && pageState == PAGE_PLAY && hitIdx < 0 && g_winner == 0
+			&& (!g_netMode || g_turn == g_netTurn))
 		{
 			int col = 0, row = 0;          // 落子位置（列,行）
 			if (g_game == 3)               // 井字棋：按格子索引（3×3 格）
@@ -124,6 +167,7 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 			                        : (col >= 0 && col <= boardX && row >= 0 && row <= boardY);
 			if (ok && putChess(col, row))     // 落在范围内且落子成功
 			{
+				if (g_netMode) netSend(1, (char)col, (char)row);   // 联机：把这步棋告诉对方
 				int w = checkWin(row, col);   // 判定胜负（参数顺序：行,列）
 				if (w) g_winner = w;          // 有人赢（或围棋提子达标）
 				else if (g_game == 3)         // 井字棋：查平局（9 格全满）
@@ -133,6 +177,45 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 						for (int j = 0; j < 3; j++)
 							if (g_board[i][j] != 0) filled++;
 					if (filled == 9) g_winner = 3;   // 3 = 平局
+				}
+			}
+		}
+
+		// ===== 联机网络：每帧轮询 =====
+		if (g_netMode)
+		{
+			// 主机：还没人连进来 → 每帧试着接一次
+			if (g_netHost && !g_netConnected)
+			{
+				if (netHostAccept())           // 有人连进来了！
+				{
+					g_netConnected = true;
+					g_game = 1; boardX = boardY = 15;   // 联机固定五子棋 15×15
+					g_turn = 1;                // 主机黑先
+					resetBoard();
+					g_netStatus = "";
+					pageState = PAGE_PLAY;     // 双方就位 → 进对局页
+				}
+			}
+			// 已连上 → 收对方的消息（落子 / 离开）
+			if (g_netConnected)
+			{
+				NetMsg msg;
+				while (netRecv(msg))
+				{
+					if (msg.op == 1 && g_winner == 0)   // 对方落子 → 我这边放上
+					{
+						putChess(msg.col, msg.row);     // 放对方的子（自动换手）
+						int w = checkWin(msg.row, msg.col);
+						if (w) g_winner = w;
+					}
+					else if (msg.op == 3)               // 对方离开
+					{
+						netEnd();                       // 清理网络
+						g_netStatus = "";
+						pageState = PAGE_HOME;          // 回主页
+						break;
+					}
 				}
 			}
 		}
@@ -150,13 +233,15 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 			if (g_winner == 1)      { tip = "黑方胜！";   tipColor = YELLOW; }
 			else if (g_winner == 2) { tip = "白方胜！";   tipColor = YELLOW; }
 			else if (g_winner == 3) { tip = "平局";       tipColor = YELLOW; }
+			else if (g_netMode)     { tip = (g_turn == 1) ? "联机·黑方执棋" : "联机·白方执棋"; tipColor = WHITE; }
 			else                    { tip = (g_turn == 1) ? "黑方执棋" : "白方执棋"; tipColor = WHITE; }
 			settextcolor(tipColor);
-			int tipX = getwidth() / 2 - textwidth(tip) / 2;   // 提示文字左缘（水平居中）
-			outtextxy(tipX, 150, tip);
+			string tipDisp = zh(tip);                       // 中文编码自适应（提示文字是 UTF-8 源码）
+			int tipX = getwidth() / 2 - textwidth(tipDisp.c_str()) / 2;   // 提示文字左缘（水平居中）
+			outtextxy(tipX, 150, tipDisp.c_str());
 			if (g_winner == 0)   // 进行中：在提示文字后面画当前执棋方的棋子
 			{
-				int cx = tipX + textwidth(tip) + 15;   // 文字右缘再往右 15px
+				int cx = tipX + textwidth(tipDisp.c_str()) + 15;   // 文字右缘再往右 15px
 				int cy = 150 + textheight(tip) / 2;    // 棋子中心 = 文字高度中部
 				if (g_turn == 1)                       // 黑子：白底 + 黑心（和棋盘画法一致）
 				{
@@ -173,7 +258,7 @@ int main()                  // 程序入口：操作系统从这里开始执行�
 				settextstyle(20, 0, UI_FONT);
 				string cap = "黑提 " + to_string(g_blackCap) + "  白提 " + to_string(g_whiteCap);
 				settextcolor(WHITE);
-				outtextxy(getwidth() / 2 - textwidth(cap.c_str()) / 2, 185, cap.c_str());
+				outtextxy(getwidth() / 2 - textwidth(zh(cap).c_str()) / 2, 185, zh(cap).c_str());
 			}
 		}
 

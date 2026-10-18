@@ -4,7 +4,7 @@
 ;  或者：右键本文件 → 用 Inno Setup 编译
 ; ============================================================
 #define MyAppName "五子棋注释学习版"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppExeName "五子棋注释学习版.exe"
 #define MyAppPublisher "200hyf"
 
